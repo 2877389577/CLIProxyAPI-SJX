@@ -61,10 +61,11 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
+	refreshCheckInterval    = 5 * time.Second
+	refreshMaxConcurrency   = 16
+	refreshPendingBackoff   = time.Minute
+	refreshFailureBackoff   = 5 * time.Minute
+	codexRefreshMaxFailures = 3
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -3274,6 +3275,9 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil || a.Disabled {
 		return false
 	}
+	if codexRefreshStopped(a) {
+		return false
+	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
 	}
@@ -3323,6 +3327,34 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return now.Sub(lastRefresh) >= *lead
 	}
 	return true
+}
+
+func isCodexAuth(a *Auth) bool {
+	if a == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(a.Provider), "codex")
+}
+
+func codexRefreshStopped(a *Auth) bool {
+	if !isCodexAuth(a) {
+		return false
+	}
+	return a.RefreshStoppedAt != nil || a.RefreshFailureCount >= codexRefreshMaxFailures
+}
+
+func refreshLogAuthFileName(a *Auth) string {
+	if a == nil {
+		return ""
+	}
+	fileName := strings.TrimSpace(a.FileName)
+	if fileName == "" {
+		fileName = strings.TrimSpace(a.ID)
+	}
+	if fileName == "" {
+		return ""
+	}
+	return filepath.Base(fileName)
 }
 
 func authPreferredInterval(a *Auth) time.Duration {
@@ -3521,8 +3553,28 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			current.LastError = &Error{Message: err.Error()}
+			if isCodexAuth(current) {
+				current.RefreshFailureCount++
+				if current.RefreshFailureCount >= codexRefreshMaxFailures {
+					current.NextRefreshAfter = time.Time{}
+					if current.RefreshStoppedAt == nil {
+						stoppedAt := now
+						current.RefreshStoppedAt = &stoppedAt
+						log.WithFields(log.Fields{
+							"provider":  current.Provider,
+							"auth_id":   current.ID,
+							"auth_file": refreshLogAuthFileName(current),
+							"attempts":  current.RefreshFailureCount,
+						}).WithError(err).Error("codex auth refresh failed after maximum retries")
+					}
+				} else {
+					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+					current.RefreshStoppedAt = nil
+				}
+			} else {
+				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			}
 			m.auths[id] = current
 			shouldReschedule = true
 			if m.scheduler != nil {
@@ -3545,6 +3597,8 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	}
 	updated.LastRefreshedAt = now
 	updated.NextRefreshAfter = time.Time{}
+	updated.RefreshFailureCount = 0
+	updated.RefreshStoppedAt = nil
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	if m.shouldRefresh(updated, now) {

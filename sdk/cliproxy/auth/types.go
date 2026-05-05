@@ -84,6 +84,10 @@ type Auth struct {
 	LastRefreshedAt time.Time `json:"last_refreshed_at"`
 	// NextRefreshAfter is the earliest time a refresh should retrigger.
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
+	// RefreshFailureCount tracks consecutive background refresh failures.
+	RefreshFailureCount int `json:"refresh_failure_count,omitempty"`
+	// RefreshStoppedAt records when background refresh was stopped after repeated failures.
+	RefreshStoppedAt *time.Time `json:"refresh_stopped_at,omitempty"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// ModelStates tracks per-model runtime availability data.
@@ -237,6 +241,10 @@ func (a *Auth) Clone() *Auth {
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()
 		}
+	}
+	if a.RefreshStoppedAt != nil {
+		stoppedAt := *a.RefreshStoppedAt
+		copyAuth.RefreshStoppedAt = &stoppedAt
 	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth

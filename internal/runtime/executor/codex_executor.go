@@ -106,6 +106,14 @@ type CodexExecutor struct {
 	cfg *config.Config
 }
 
+type codexTokenRefresher interface {
+	RefreshTokens(ctx context.Context, refreshToken string) (*codexauth.CodexTokenData, error)
+}
+
+var newCodexTokenRefresher = func(cfg *config.Config, proxyURL string) codexTokenRefresher {
+	return codexauth.NewCodexAuthWithProxyURL(cfg, proxyURL)
+}
+
 func NewCodexExecutor(cfg *config.Config) *CodexExecutor { return &CodexExecutor{cfg: cfg} }
 
 func (e *CodexExecutor) Identifier() string { return "codex" }
@@ -705,8 +713,8 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := codexauth.NewCodexAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	svc := newCodexTokenRefresher(e.cfg, auth.ProxyURL)
+	td, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		return nil, err
 	}
