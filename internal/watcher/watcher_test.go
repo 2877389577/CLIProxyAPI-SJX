@@ -220,6 +220,24 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	if reloads != 2 {
 		t.Fatalf("expected changed config to trigger reload, callback count %d", reloads)
 	}
+
+	invalidCfg := &config.Config{
+		Port:        7070,
+		AuthDir:     authDir,
+		IPBlacklist: []string{"not-an-ip"},
+	}
+	invalidData, errMarshal := yaml.Marshal(invalidCfg)
+	if errMarshal != nil {
+		t.Fatalf("failed to marshal invalid config: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(configPath, invalidData, 0o644); errWrite != nil {
+		t.Fatalf("failed to write invalid config: %v", errWrite)
+	}
+	w.reloadConfigIfChanged()
+	if reloads != 2 {
+		t.Fatalf("expected invalid config to keep previous reload count, got %d", reloads)
+	}
+
 	w.clientsMutex.RLock()
 	defer w.clientsMutex.RUnlock()
 	if w.config == nil || w.config.Port != 9090 || !w.config.RemoteManagement.AllowRemote {

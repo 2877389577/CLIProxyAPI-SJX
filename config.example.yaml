@@ -5,6 +5,16 @@ host: ""
 # Server port
 port: 8317
 
+# Direct client IP addresses or CIDR ranges blocked from all main HTTP routes.
+# The TCP peer address is used; X-Forwarded-For and X-Real-IP are ignored.
+# Leave empty or omit this setting to disable IP blocking.
+ip-blacklist: []
+# Example:
+# ip-blacklist:
+#   - "203.0.113.8"
+#   - "10.0.0.0/8"
+#   - "2001:db8::/32"
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false

@@ -209,6 +209,9 @@ type Server struct {
 	// cfg holds the current server configuration.
 	cfg *config.Config
 
+	// ipBlacklist blocks matching direct peer addresses before application middleware and authentication.
+	ipBlacklist *ipBlacklist
+
 	// oldConfigYaml stores a YAML snapshot of the previous configuration for change detection.
 	// This prevents issues when the config object is modified in place by Management API.
 	oldConfigYaml []byte
@@ -286,9 +289,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		optionState.engineConfigurator(engine)
 	}
 
+	blacklist, errBlacklist := newIPBlacklist(cfg.IPBlacklist)
+	if errBlacklist != nil {
+		log.WithError(errBlacklist).Error("failed to initialize IP blacklist")
+		blacklist, _ = newIPBlacklist(nil)
+	}
+
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(blacklist.Middleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -324,6 +334,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		engine:              engine,
 		handlers:            handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager),
 		cfg:                 cfg,
+		ipBlacklist:         blacklist,
 		accessManager:       accessManager,
 		requestLogger:       requestLogger,
 		loggerToggle:        toggle,
@@ -1679,6 +1690,13 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (s *Server) UpdateClients(cfg *config.Config) {
+	if s != nil && s.ipBlacklist != nil {
+		if errUpdate := s.ipBlacklist.Update(cfg.IPBlacklist); errUpdate != nil {
+			log.WithError(errUpdate).Error("failed to update IP blacklist; keeping previous server configuration")
+			return
+		}
+	}
+
 	// Reconstruct old config from YAML snapshot to avoid reference sharing issues
 	var oldCfg *config.Config
 	if len(s.oldConfigYaml) > 0 {

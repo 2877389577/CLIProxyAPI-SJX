@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"syscall"
@@ -34,6 +35,9 @@ type Config struct {
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
+
+	// IPBlacklist contains exact IP addresses or CIDR prefixes blocked from the main HTTP server.
+	IPBlacklist []string `yaml:"ip-blacklist" json:"ip-blacklist"`
 
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
@@ -741,6 +745,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+	if err = cfg.NormalizeIPBlacklist(); err != nil {
+		if optional {
+			cfgOptional := &Config{}
+			cfgOptional.NormalizePluginsConfig()
+			return cfgOptional, nil
+		}
+		return nil, fmt.Errorf("invalid ip-blacklist configuration: %w", err)
+	}
 
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
@@ -848,6 +860,60 @@ func (cfg *Config) NormalizePluginsConfig() {
 	if cfg.Plugins.Configs == nil {
 		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
 	}
+}
+
+// NormalizeIPBlacklist validates, canonicalizes, and deduplicates configured IP blacklist entries.
+func (cfg *Config) NormalizeIPBlacklist() error {
+	if cfg == nil || len(cfg.IPBlacklist) == 0 {
+		return nil
+	}
+
+	normalized := make([]string, 0, len(cfg.IPBlacklist))
+	seen := make(map[string]struct{}, len(cfg.IPBlacklist))
+	for index, rawEntry := range cfg.IPBlacklist {
+		entry := strings.TrimSpace(rawEntry)
+		if entry == "" {
+			return fmt.Errorf("entry %d is empty", index)
+		}
+
+		canonical, errNormalize := normalizeIPBlacklistEntry(entry)
+		if errNormalize != nil {
+			return fmt.Errorf("entry %d (%q): %w", index, entry, errNormalize)
+		}
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		normalized = append(normalized, canonical)
+	}
+
+	cfg.IPBlacklist = normalized
+	return nil
+}
+
+func normalizeIPBlacklistEntry(entry string) (string, error) {
+	if strings.Contains(entry, "/") {
+		prefix, errParse := netip.ParsePrefix(entry)
+		if errParse != nil {
+			return "", fmt.Errorf("invalid IP prefix: %w", errParse)
+		}
+		if prefix.Addr().Zone() != "" {
+			return "", fmt.Errorf("IPv6 zones are not supported")
+		}
+		if prefix.Addr().Is4In6() && prefix.Bits() >= 96 {
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+		}
+		return prefix.Masked().String(), nil
+	}
+
+	addr, errParse := netip.ParseAddr(entry)
+	if errParse != nil {
+		return "", fmt.Errorf("invalid IP address: %w", errParse)
+	}
+	if addr.Zone() != "" {
+		return "", fmt.Errorf("IPv6 zones are not supported")
+	}
+	return addr.Unmap().String(), nil
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
